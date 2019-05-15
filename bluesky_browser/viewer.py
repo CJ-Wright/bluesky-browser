@@ -16,7 +16,7 @@ from qtpy.QtWidgets import (
 
 from .header_tree import HeaderTreeFactory
 from .baseline import BaselineFactory
-from .figures import FigureManager
+from .figures import QtFigureManager
 from .utils import MoveableTabWidget, MoveableTabContainer
 
 
@@ -209,7 +209,7 @@ class RunViewer(QTabWidget):
         self.run_router = RunRouter([
             HeaderTreeFactory(self.addTab),
             BaselineFactory(self.addTab),
-            FigureManager(self.addTab),
+            QtFigureManager(self.addTab),
             ])
 
     @property

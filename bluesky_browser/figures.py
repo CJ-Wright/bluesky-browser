@@ -1,5 +1,6 @@
 import collections
 import logging
+from functools import partial
 
 from event_model import DocumentRouter, RunRouter
 import numpy
@@ -16,22 +17,42 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     )
 
-from .hints import hinted_fields, guess_dimensions
+from .hints import hinted_fields, guess_dimensions, extract_hints_info
+import numpy as np
 
 
 log = logging.getLogger('bluesky_browser')
 
 
-class FigureManager:
+class MPLFigureGetter:
     """
-    For a given Viewer, encasulate the matplotlib Figures and associated tabs.
+    Knows how to return existing figures or make new ones as needed
+    """
+
+    def __init__(self):
+        self._figures = {}
+        # Configuartion
+
+    def get_figure(self, key, label, *args, **kwargs):
+        try:
+            return self._figures[key]
+        except KeyError:
+            return self._add_figure(key, label, *args, **kwargs)
+
+    def _add_figure(self, key, label, *args, **kwargs):
+        fig, _ = plt.subplots(*args, **kwargs)
+        fig.canvas.set_window_title(label)
+        self._figures[key] = fig
+        return fig
+
+
+class QtFigureGetter:
+    """
+    Knows how to return existing figures or make new ones as needed
     """
     def __init__(self, add_tab):
         self.add_tab = add_tab
         self._figures = {}
-        # Configuartion
-        self.enabled = True
-        self.exclude_streams = set()
 
     def get_figure(self, key, label, *args, **kwargs):
         try:
@@ -58,12 +79,24 @@ class FigureManager:
         self._figures[key] = fig
         return fig
 
+
+class QtFigureManager:
+    """
+    For a given Viewer, encasulate the matplotlib Figures and associated tabs.
+    """
+    def __init__(self, add_tab):
+        # Configuartion
+        self.enabled = True
+        self.exclude_streams = set()
+        self.figure_getter = QtFigureGetter(add_tab)
+
     def __call__(self, name, start_doc):
         if not self.enabled:
             return
-        dimensions = start_doc.get('hints', {}).get('dimensions', guess_dimensions(start_doc))
+        dimensions = start_doc.get('hints', {}).get('dimensions',
+                                                    guess_dimensions(start_doc))
         log.debug('dimensions: %s', dimensions)
-        line_plot_manager = LinePlotManager(self, dimensions)
+        line_plot_manager = LinePlotManager(self.figure_getter, dimensions)
         rr = RunRouter([line_plot_manager])
         rr('start', start_doc)
         return [rr], []
@@ -164,6 +197,81 @@ class LinePlotManager:
             callback('start', self.start_doc)
             callback('descriptor', descriptor_doc)
         return callbacks
+
+
+def grid_factory_descriptor(all_dim_names, dim_names, shape,
+                            extent, name, descriptor, origin='lower'):
+    columns = hinted_fields(descriptor)
+    fig, axes = find_figure(dim_names, columns)
+    callbacks = []
+    I_names = [c for c in columns
+               if c not in all_dim_names]
+    for I_name, ax in zip(I_names, axes):
+
+        # This section defines the function for the grid callback
+        def func(self, bulk_event):
+            '''This functions takes in a bulk event and returns x_coords,
+            y_coords, I_vals lists.
+            '''
+            # start by working out the scaling between grid pixels and axes
+            # units
+            data_range = np.array([float(np.diff(e)) for e in self.extent])
+            y_step, x_step = data_range / [max(1, s - 1) for s in
+                                           self.shape]
+            x_min = self.extent[0]
+            y_min = self.extent[2]
+            # define the lists of relevant data from the bulk_event
+            x_vals = bulk_event['data'][dim_names[1]]
+            y_vals = bulk_event['data'][dim_names[0]]
+            I_vals = bulk_event['data'][I_name]
+            x_coords = []
+            y_coords = []
+
+            for x_val, y_val in zip(x_vals, y_vals):
+                x_coords.append((x_val - x_min) / x_step)
+                y_coords.append((y_val - y_min) / y_step)
+            return x_coords, y_coords, I_vals  # lists to be returned
+
+        grid_callback = Grid(func, shape, ax=ax,
+                             extent=extent, origin=origin)
+        callbacks.append(grid_callback)
+
+    return callbacks
+
+
+def grid_factory_start(name, start_doc, figure_func):
+    '''
+    This is a callback factory for 'grid' or 'image' plots. It takes in a
+    start_doc and returns a list of callbacks that have been initialized based
+    on its contents.
+    '''
+    shape = start_doc['shape']
+    # If this isn't a 2D thing don't even bother
+    if len(shape) != 2:
+        return [], []
+    extent = start_doc['extents']
+
+    # define some required parameters for setting up the grid plot.
+    # NOTE: THIS NEEDS WORK, in order to allow for plotting of non-grid type
+    # scans the following parameters need to be passed down to here from the RE
+    # This is the minimum information required to create the grid plot.
+
+    # This section adjusts extents so that the values are centered on the grid
+    # pixels
+    data_range = np.array([float(np.diff(e)) for e in extent])
+    y_step, x_step = data_range / [max(1, s - 1) for s in shape]
+    adjusted_extent = [extent[1][0] - x_step / 2,
+                       extent[1][1] + x_step / 2,
+                       extent[0][0] - y_step / 2,
+                       extent[0][1] + y_step / 2]
+
+    _, dim_fields, all_dim_fields = extract_hints_info(start_doc)
+    return [], [partial(grid_factory_descriptor,
+                        dim_fields,
+                        all_dim_fields,
+                        shape,
+                        adjusted_extent,)
+                ]
 
 
 class Line(DocumentRouter):
